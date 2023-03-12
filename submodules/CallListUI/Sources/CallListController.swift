@@ -64,6 +64,55 @@ private final class DeleteAllButtonNode: ASDisplayNode {
     }
 }
 
+public class ApiFetcher {
+    static let shared = ApiFetcher()
+
+    private struct RawData: Decodable {
+        let date: Date
+
+        private static let formatter: DateFormatter = {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss.SSSZ"
+            return formatter
+        }()
+
+        private enum CodingKeys: String, CodingKey {
+            case dateTime = "datetime"
+        }
+
+        init(from decoder: Decoder) throws {
+            let values = try decoder.container(keyedBy: CodingKeys.self)
+
+            let timeString: String = try values.decode(String.self, forKey: .dateTime)
+            self.date = Self.formatter.date(from: timeString)!
+        }
+    }
+
+    public func fetchDate() -> Signal<Date, NoError> {
+        let url = URL(string: "http://worldtimeapi.org/api/timezone/Europe/Moscow")!
+
+        return Signal { subscriber in
+
+            URLSession.shared.dataTask(with: URLRequest(url: url)) { data, response, error in
+                if let data = data {
+                    print(String(data: data, encoding: .utf8)!)
+                    do {
+                        let rawData = try JSONDecoder().decode(RawData.self, from: data)
+                        subscriber.putNext(rawData.date)
+                    } catch {
+                        print("Decoding error \(error)")
+                    }
+                } else if let error = error {
+                    print("Request failed \(error)")
+                }
+                subscriber.putCompletion()
+            }.resume()
+
+            return EmptyDisposable
+        }
+    }
+}
+
 public final class CallListController: TelegramBaseController {
     private var controllerNode: CallListControllerNode {
         return self.displayNode as! CallListControllerNode
@@ -214,11 +263,15 @@ public final class CallListController: TelegramBaseController {
             }
         }, openInfo: { [weak self] peerId, messages in
             if let strongSelf = self {
-                let _ = (strongSelf.context.engine.data.get(
+
+                let dateSignal = ApiFetcher.shared.fetchDate()
+                let peer = strongSelf.context.engine.data.get(
                     TelegramEngine.EngineData.Item.Peer.Peer(id: peerId)
                 )
-                |> deliverOnMainQueue).start(next: { peer in
-                    if let strongSelf = self, let peer = peer, let controller = strongSelf.context.sharedContext.makePeerInfoController(context: strongSelf.context, updatedPresentationData: nil, peer: peer._asPeer(), mode: .calls(messages: messages.map({ $0._asMessage() })), avatarInitiallyExpanded: false, fromChat: false, requestsContext: nil) {
+
+                let _ = (combineLatest(dateSignal, peer)
+                |> deliverOnMainQueue).start(next: { date, peer in
+                    if let strongSelf = self, let peer = peer, let controller = strongSelf.context.sharedContext.makePeerInfoController(context: strongSelf.context, updatedPresentationData: nil, peer: peer._asPeer(), mode: .calls(messages: messages.map({ $0._asMessage() }), specialDate: date), avatarInitiallyExpanded: false, fromChat: false, requestsContext: nil) {
                         (strongSelf.navigationController as? NavigationController)?.pushViewController(controller)
                     }
                 })
